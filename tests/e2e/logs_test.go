@@ -44,8 +44,7 @@ var _ = Describe("E2E - Getting logs node", Label("logs"), func() {
 			_ = os.Chdir("logs")
 			myDir, _ := os.Getwd()
 
-			var binaries []binary = []binary{elemental, logCollector}
-			for _, b := range binaries {
+			for _, b := range []binary{elemental, logCollector} {
 				Eventually(func() error {
 					return exec.Command("curl", "-L", b.Url, "-o", b.Name).Run()
 				}, misc.SetTimeout(1*time.Minute), 5*time.Second).Should(BeNil())
@@ -78,5 +77,15 @@ var _ = Describe("E2E - Getting logs node", Label("logs"), func() {
 				}
 			}
 		})
+
+		if proxy != "" {
+			By("Collecting proxy log and make sure traffic went through it", func() {
+				out, err := exec.Command("docker", "exec", "squid_proxy", "cat", "/var/log/squid/access.log").CombinedOutput()
+				checkRC(err)
+				err = os.WriteFile("squid.log", []byte(out), os.ModePerm)
+				checkRC(err)
+				Expect(out).Should(MatchRegexp("TCP_TUNNEL/200.*CONNECT git.rancher.io"))
+			})
+		}
 	})
 })

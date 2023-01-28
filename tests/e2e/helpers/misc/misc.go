@@ -1,11 +1,14 @@
 package misc
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -16,9 +19,127 @@ import (
 	libvirtxml "libvirt.org/libvirt-go-xml"
 )
 
+// Cluster is the definition of a K8s cluster
+type Cluster struct {
+	APIVersion string        `yaml:"apiVersion"`
+	Kind       string        `yaml:"kind,omitempty"`
+	Metadata   Metadata      `yaml:"metadata"`
+	Spec       ClusterSpec   `yaml:"spec"`
+	Status     ClusterStatus `yaml:"status,omitempty"`
+}
+
+// Metadata is metadata attached to any object
+type Metadata struct {
+	Annotations     interface{} `yaml:"annotations"`
+	Labels          interface{} `yaml:"labels,omitempty"`
+	Finalizers      interface{} `yaml:"finalizers,omitempty"`
+	ManagedFields   interface{} `yaml:"managedFields,omitempty"`
+	Name            string      `yaml:"name"`
+	Namespace       string      `yaml:"namespace"`
+	ResourceVersion string      `yaml:"resourceVersion"`
+	UID             string      `yaml:"uid"`
+}
+
+// ClusterSpec is a description of a cluster
+type ClusterSpec struct {
+	KubernetesVersion        string      `yaml:"kubernetesVersion"`
+	LocalClusterAuthEndpoint interface{} `yaml:"localClusterAuthEndpoint"`
+	RkeConfig                RKEConfig   `yaml:"rkeConfig"`
+}
+
+// RKEConfig has all RKE/K3s cluster information
+type RKEConfig struct {
+	Etcd                interface{}    `yaml:"etcd,omitempty"`
+	ChartValues         interface{}    `yaml:"chartValues"`
+	MachineGlobalConfig interface{}    `yaml:"machineGlobalConfig"`
+	MachinePools        []MachinePools `yaml:"machinePools"`
+	UpgradeStrategy     interface{}    `yaml:"upgradeStrategy,omitempty"`
+}
+
+// MachinePools has all pools information
+type MachinePools struct {
+	ControlPlaneRole bool             `yaml:"controlPlaneRole,omitempty"`
+	EtcdRole         bool             `yaml:"etcdRole,omitempty"`
+	MachineConfigRef MachineConfigRef `yaml:"machineConfigRef"`
+	Name             string           `yaml:"name"`
+	Quantity         int              `yaml:"quantity"`
+	WorkerRole       bool             `yaml:"workerRole,omitempty"`
+}
+
+// MachineConfigRef makes the link between the cluster, pool and the Elemental nodes
+type MachineConfigRef struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Name       string `yaml:"name"`
+}
+
+// ClusterStatus has all the cluster status information
+type ClusterStatus struct {
+	AgentDeployed    bool               `yaml:"agentDeployed,omitempty"`
+	ClientSecretName string             `yaml:"clientSecretName"`
+	ClusterName      string             `yaml:"clusterName"`
+	Conditions       []ClusterCondition `yaml:"conditions,omitempty"`
+	Ready            bool               `yaml:"ready,omitempty"`
+}
+
+// ClusterCondition is the cluster condition status
+type ClusterCondition struct {
+	LastUpdateTime string `yaml:"lastUpdateTime"`
+	Message        string `yaml:"message,omitempty"`
+	Reason         string `yaml:"reason,omitempty"`
+	Status         string `yaml:"status"`
+	Type           string `yaml:"type"`
+}
+
 const (
 	httpSrv = "http://192.168.122.1:8000"
 )
+
+func (c *Cluster) getCluster(ns, name string) error {
+	out, err := kubectl.Run("get", "cluster",
+		"--namespace", ns, name,
+		"-o", "yaml")
+	if err != nil {
+		return err
+	}
+
+	// Decode content
+	if err := yaml.Unmarshal([]byte(out), c); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Cluster) setCluster(ns, name string) error {
+	// Encode content
+	out, err := yaml.Marshal(&c)
+	if err != nil {
+		return err
+	}
+
+	// Use temporary file
+	f, err := os.CreateTemp("", "updatedCluster")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.Write(out); err != nil {
+		return err
+	}
+
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	// Apply new cluster configuration
+	if err := kubectl.Apply(ns, f.Name()); err != nil {
+		return err
+	}
+
+	return nil
+}
 
 func GetServerId(clusterNS string, index int) (string, error) {
 	serverId, err := kubectl.Run("get", "MachineInventories",
@@ -111,6 +232,92 @@ func SetTimeout(timeout time.Duration) time.Duration {
 	return timeout
 }
 
+func IncreaseQuantity(ns, name, pool string, quantity int) (int, error) {
+	c := &Cluster{}
+	quantitySet := 0
+	poolFound := false
+
+	// Get cluster configuration
+	if err := c.getCluster(ns, name); err != nil {
+		return 0, err
+	}
+
+	// Try to increase quantity field
+	for i := range c.Spec.RkeConfig.MachinePools {
+		// Only on selected pool
+		if c.Spec.RkeConfig.MachinePools[i].Name == pool {
+			// Pool found!
+			poolFound = true
+
+			// Increase quantity
+			c.Spec.RkeConfig.MachinePools[i].Quantity += quantity
+			quantitySet = c.Spec.RkeConfig.MachinePools[i].Quantity
+
+			// Quantity increased, loop can be stopped
+			break
+		}
+	}
+
+	// Throw an error if the pool has not been found
+	if !poolFound {
+		return 0, errors.New("pool '" + pool + "' does not exist!")
+	}
+
+	// Save and apply cluster configuration
+	if err := c.setCluster(ns, name); err != nil {
+		return 0, err
+	}
+
+	return quantitySet, nil
+}
+
+// How to use it, for example:
+// err := misc.ToggleRole(clusterNS, clusterName, "pool-worker-"+clusterName, "ControlPlaneRole", true)
+func ToggleRole(ns, name, pool, role string, value bool) error {
+	c := &Cluster{}
+	poolFound := false
+
+	// Get cluster configuration
+	if err := c.getCluster(ns, name); err != nil {
+		return err
+	}
+
+	// Try to set value to role
+	for i := range c.Spec.RkeConfig.MachinePools {
+		// Only on selected pool
+		if c.Spec.RkeConfig.MachinePools[i].Name == pool {
+			// Pool found!
+			poolFound = true
+
+			// Get fields list and check that the role exist
+			v := reflect.ValueOf(&c.Spec.RkeConfig.MachinePools[i]).Elem()
+			f := v.FieldByName(role)
+			if f == (reflect.Value{}) {
+				// No, return an error
+				return errors.New("role '" + role + "' does not exist!")
+			} else {
+				// Yes, set the value accordingly
+				v.FieldByName(role).SetBool(value)
+
+				// Role toggled, loop can be stopped
+				break
+			}
+		}
+	}
+
+	// Throw an error if the pool has not been found
+	if !poolFound {
+		return errors.New("pool '" + pool + "' does not exist!")
+	}
+
+	// Save and apply cluster configuration
+	if err := c.setCluster(ns, name); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func AddSelector(key, value string) ([]byte, error) {
 	type selectorYaml struct {
 		MatchLabels map[string]string `yaml:"matchLabels,omitempty"`
@@ -162,6 +369,11 @@ func ConcateFiles(srcfile, dstfile string, data []byte) error {
 	return nil
 }
 
+func CopyFile(srcFile, dstFile string) error {
+	// Concate files without adding data is in fact a copy
+	return (ConcateFiles(srcFile, dstFile, []byte("")))
+}
+
 func TrimStringFromChar(s, c string) string {
 	if idx := strings.Index(s, c); idx != -1 {
 		return s[:idx]
@@ -169,7 +381,7 @@ func TrimStringFromChar(s, c string) string {
 	return s
 }
 
-func AddNode(name string, index int, file string) error {
+func AddNode(file, name string, index int) error {
 	// Read live XML configuration
 	fileContent, err := exec.Command("sudo", "virsh", "net-dumpxml", "default").Output()
 	if err != nil {
@@ -214,4 +426,24 @@ func AddNode(name string, index int, file string) error {
 
 	// All good!
 	return nil
+}
+
+func FileShare(directory, listenAddr string) {
+	fs := http.FileServer(http.Dir(directory))
+
+	go func() {
+		if err := http.ListenAndServe(listenAddr, fs); err != nil {
+			fmt.Printf("Server failed: %s\n", err)
+		}
+	}()
+}
+
+func SetHostname(baseName string, index int) string {
+	if baseName == "" {
+		baseName = "emtpy"
+	}
+	if index < 0 {
+		index = 0
+	}
+	return baseName + "-" + fmt.Sprintf("%03d", index)
 }

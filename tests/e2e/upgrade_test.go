@@ -26,22 +26,16 @@ import (
 )
 
 var _ = Describe("E2E - Upgrading node", Label("upgrade"), func() {
-	var (
-		client *tools.Client
-	)
-
-	BeforeEach(func() {
+	It("Upgrade node", func() {
 		hostData, err := tools.GetHostNetConfig(".*name=\""+vmName+"\".*", netDefaultFileName)
 		Expect(err).To(Not(HaveOccurred()))
 
-		client = &tools.Client{
+		client := &tools.Client{
 			Host:     string(hostData.IP) + ":22",
 			Username: userName,
 			Password: userPassword,
 		}
-	})
 
-	It("Upgrade node", func() {
 		By("Checking if upgrade type is set", func() {
 			Expect(upgradeType).To(Not(BeEmpty()))
 		})
@@ -54,7 +48,7 @@ var _ = Describe("E2E - Upgrading node", Label("upgrade"), func() {
 
 		if upgradeType != "manual" {
 			By("Triggering Upgrade in Rancher with "+upgradeType, func() {
-				upgradeOsYaml := "../assets/upgrade_clusterTargets.yaml"
+				upgradeOsYaml := upgradeClusterTargetsYaml
 				upgradeTypeValue := osImage // Default to osImage
 				if upgradeType == "managedOSVersionName" {
 					upgradeTypeValue = imageVersion
@@ -65,18 +59,15 @@ var _ = Describe("E2E - Upgrading node", Label("upgrade"), func() {
 
 				// We don't know what is the previous type of upgrade, so easier to replace all here
 				// as there is only one in the yaml file anyway
-				patterns := []string{"%OS_IMAGE%", "osImage:.*", "managedOSVersionName:.*"}
-				for _, p := range patterns {
+				for _, p := range []string{"%OS_IMAGE%", "osImage:.*", "managedOSVersionName:.*"} {
 					err := tools.Sed(p, upgradeType+": "+upgradeTypeValue, upgradeOsYaml)
 					Expect(err).To(Not(HaveOccurred()))
 				}
 
-				err := tools.Sed("%CLUSTER_NAME%", clusterName, upgradeOsYaml)
+				err := tools.Sed("%CLUSTER_NAME%", clusterName, upgradeClusterTargetsYaml)
 				Expect(err).To(Not(HaveOccurred()))
 
 				if upgradeType == "managedOSVersionName" {
-					osListYaml := "../assets/managedOSVersionChannel.yaml"
-
 					// Get elemental-operator version
 					operatorVersion, err := misc.GetOperatorVersion()
 					Expect(err).To(Not(HaveOccurred()))
@@ -109,12 +100,11 @@ var _ = Describe("E2E - Upgrading node", Label("upgrade"), func() {
 					Expect(err).To(Not(HaveOccurred()), selector)
 
 					// Create new file for this specific upgrade
-					dst := "../assets/upgrade_managedOSVersionName.yaml"
-					err = misc.ConcateFiles(upgradeOsYaml, dst, selector)
+					err = misc.ConcateFiles(upgradeClusterTargetsYaml, upgradeOSVersionNameYaml, selector)
 					Expect(err).To(Not(HaveOccurred()), selector)
 
 					// Swap yaml file
-					upgradeOsYaml = dst
+					upgradeOsYaml = upgradeOSVersionNameYaml
 
 					// Set correct value for os osImage
 					out, err := kubectl.Run("get", "ManagedOSVersion",

@@ -9,20 +9,30 @@ on:
         description: Credentials to use to connect
         required: true
       pat_token:
+        # A token is needed to be able to add runner on the repo, maybe this can be changed later
+        # This token is linked to a personal account
+        # So in case of token issue you have to check (no specific order and for example):
+        # - the expiration date
+        # - if the account associated still exists
+        # - if the person still has access to the repo
         description: PAT token used to add runner
         required: true
       slack_webhook_url:
         description: WebHook URL to use for Slack
         required: true
     inputs:
-      ui_account:
-        description: Account used to test RBAC role in UI
-        required: false
+      ca_type:
+        description: CA type to use (selfsigned or private)
+        default: selfsigned
         type: string
       cluster_name:
         description: Name of the provisioned cluster
         required: true
         type: string
+      destroy_runner:
+        description: Destroy the auto-generated self-hosted runner
+        default: true
+        type: boolean
       elemental_support:
         description: URL of the elemental support binary
         default: https://github.com/rancher/elemental-operator/releases/download/v1.0.0/elemental-support_1.0.0_linux_amd64
@@ -34,13 +44,12 @@ on:
         description: Name and version of installed K8s distribution
         required: true
         type: string
-      ca_type:
-        description: CA type to use (selfsigned or private)
-        default: selfsigned
-        type: string
       node_number:
         description: Number of nodes to deploy on the provisioned cluster
         default: 5
+        type: string
+      proxy:
+        description: Deploy a proxy
         type: string
       rancher_channel:
         description: Rancher Manager channel to use for installation (alpha/latest/stable)
@@ -56,7 +65,7 @@ on:
         type: string
       runner_template:
         description: Runner template to use
-        default: elemental-e2e-ci-runner-spot-x86-64-template-n2-standard-8-v2
+        default: elemental-e2e-ci-runner-spot-x86-64-template-n2-standard-16-v2
         type: string
       start_condition:
         description: Start condition of the runner
@@ -66,16 +75,20 @@ on:
         description: Type of test to run (cli or ui)
         default: cli
         type: string
+      ui_account:
+        description: Account used to test RBAC role in UI
+        required: false
+        type: string
       upgrade_operator:
         description: URL to elemental-operator version to upgrade to
-        type: string
-      zone:
-        description: GCP zone to host the runner
-        default: us-central1-a
         type: string
       workflow_download:
         description: build-ci workflow to use for artifacts
         default: build-ci.yaml
+        type: string
+      zone:
+        description: GCP zone to host the runner
+        default: us-central1-a
         type: string
 
 jobs:
@@ -114,7 +127,7 @@ jobs:
     needs: create-runner
     runs-on: ${{ needs.create-runner.outputs.uuid }}
     env:
-      TIMEOUT_SCALE: 2
+      TIMEOUT_SCALE: 3
       ARCH: amd64
       CLUSTER_NAME: ${{ inputs.cluster_name }}
       CLUSTER_NS: fleet-default
@@ -130,8 +143,6 @@ jobs:
       # For K8s cluster to provision with Rancher Manager
       K8S_VERSION_TO_PROVISION: ${{ inputs.k8s_version_to_provision }}
     steps:
-      - name: Be sure to remove all previous data from worker ♻
-        run: rm -rf ./*
       - name: Checkout
         uses: actions/checkout@v3
       - name: Install Go
@@ -170,10 +181,15 @@ jobs:
           mv -f build/* .
           # Looks a little bit weird but we have to keep the ISO in build!
           mv -f elemental-*.iso build/
+      - name: Deploy Proxy
+        id: proxy
+        if: inputs.proxy == 'elemental' || inputs.proxy == 'rancher'
+        run: docker run -d --name squid_proxy -v $(pwd)/tests/assets/squid.conf:/etc/squid/squid.conf -p 3128:3128 wernight/squid
       - name: Install Rancher
         id: installation
         env:
           CA_TYPE: ${{ inputs.ca_type }}
+          PROXY: ${{ inputs.proxy }}
           TEST_TYPE: ${{ inputs.test_type }}
         run: |
           export MY_HOSTNAME=$(hostname -f)
@@ -196,29 +212,36 @@ jobs:
             cypress/e2e/unit_tests/menu.spec.ts
             cypress/e2e/unit_tests/machine_registration.spec.ts
             cypress/e2e/unit_tests/advanced_filtering.spec.ts
-        run: make -f tests/Makefile start-cypress-tests
+        run: cd tests && make start-cypress-tests
       - name: Upload Cypress screenshots (Basics)
-        if: failure()
+        if: failure() && inputs.test_type == 'ui'
         uses: actions/upload-artifact@v3
         with:
           name: cypress-screenshots-basics-${{ inputs.cluster_name }}
-          path: cypress/screenshots
+          path: tests/cypress/screenshots
           retention-days: 7
           if-no-files-found: ignore
       - name: Upload Cypress videos (Basics)
         # Test run video is always captured, so this action uses "always()" condition
-        if: always()
+        if: always() && inputs.test_type == 'ui'
         uses: actions/upload-artifact@v3
         with:
           name: cypress-videos-basics-${{ inputs.cluster_name }}
-          path: cypress/videos
+          path: tests/cypress/videos
           retention-days: 7
-          if-no-files-found: ignore
       - name: Deploy a node to join Rancher manager
         if: inputs.test_type == 'ui'
         env:
           VM_INDEX: 1
-        run: cd tests && make e2e-ui-rancher
+          HOST_MEMORY_RESERVED: 50331648
+        run: |
+          cd tests && (
+            # Removing 'downloads' is needed to avoid this error during 'make':
+            # 'pattern all: open .../elemental/tests/cypress/downloads: permission denied'
+            sudo rm -rf cypress/downloads
+
+            make e2e-ui-rancher
+          )
       - name: Cypress tests - Advanced
         # Advanced means tests which needs an extra elemental node (provisioned with libvirt)
         if: inputs.test_type == 'ui'
@@ -226,33 +249,39 @@ jobs:
           UI_ACCOUNT: ${{ inputs.ui_account }}
           BROWSER: firefox
           CYPRESS_DOCKER: 'cypress/included:10.9.0'
+          PROXY: ${{ inputs.proxy }}
           RANCHER_PASSWORD: rancherpassword
           RANCHER_URL: https://${{ steps.installation.outputs.MY_HOSTNAME }}/dashboard
           RANCHER_USER: admin
           SPEC: |
             cypress/e2e/unit_tests/machine_selector.spec.ts
             cypress/e2e/unit_tests/machine_inventory.spec.ts
+            cypress/e2e/unit_tests/deploy_app.spec.ts
             cypress/e2e/unit_tests/upgrade.spec.ts
         run: |
-          export OPERATOR_VERSION=$(kubectl get pods -n cattle-elemental-system -l app=elemental-operator -o jsonpath={.items[*].status.containerStatuses[*].image}|awk -F ':' '{print substr($2,0,3)}')
-          make -f tests/Makefile start-cypress-tests
+          export OPERATOR_VERSION=$(kubectl get pods \
+                                      -n cattle-elemental-system \
+                                      -l app=elemental-operator \
+                                      -o jsonpath={.items[*].status.containerStatuses[*].image} \
+                                    | awk -F ':' '{print substr($2,0,3)}')
+
+          cd tests && make start-cypress-tests
       - name: Upload Cypress screenshots (Advanced)
-        if: failure()
+        if: failure() && inputs.test_type == 'ui'
         uses: actions/upload-artifact@v3
         with:
           name: cypress-screenshots-advanced-${{ inputs.cluster_name }}
-          path: cypress/screenshots
+          path: tests/cypress/screenshots
           retention-days: 7
           if-no-files-found: ignore
       - name: Upload Cypress videos (Advanced)
         # Test run video is always captured, so this action uses "always()" condition
-        if: always()
+        if: always() && inputs.test_type == 'ui'
         uses: actions/upload-artifact@v3
         with:
           name: cypress-videos-advanced-${{ inputs.cluster_name }}
-          path: cypress/videos
+          path: tests/cypress/videos
           retention-days: 7
-          if-no-files-found: ignore
       - name: Configure Rancher & Libvirt
         if: inputs.test_type == 'cli'
         run: cd tests && make e2e-configure-rancher
@@ -263,48 +292,43 @@ jobs:
           VM_INDEX: 1
         run: cd tests && make e2e-bootstrap-node
       - name: Upgrade node 1 (with osImage method) to latest build
-        if: inputs.test_type == 'cli'
+        if: inputs.test_type == 'cli' && !contains(inputs.iso_to_test, '/Stable:/')
         env:
           CONTAINER_IMAGE: quay.io/costoolkit/elemental-ci:latest
           UPGRADE_TYPE: osImage
           VM_INDEX: 1
         run: cd tests && make e2e-upgrade-node
-      - name: Bootstrap node 2 with current build (use ISO)
+      - name: Bootstrap node 2 and 3 with current build (use Emulated TPM and ISO)
         if: inputs.test_type == 'cli'
         env:
+          EMULATE_TPM: true
           ISO_BOOT: true
           VM_INDEX: 2
-        run: cd tests && make e2e-bootstrap-node
-      - name: Bootstrap node 3 with current build (use ISO)
-        if: inputs.test_type == 'cli'
-        env:
-          ISO_BOOT: true
-          VM_INDEX: 3
-        run: cd tests && make e2e-bootstrap-node
+          VM_NUMBERS: 3
+        run: |
+          OPERATOR_VERSION=$(kubectl get pods \
+                               -n cattle-elemental-system \
+                               -l app=elemental-operator \
+                               -o jsonpath={.items[*].status.containerStatuses[*].image} \
+                             | awk -F ':' '{print substr($2,0,3)}')
+
+          # If elemental-operator is a v1.0.x we should disable EMULATE_TPM
+          [[ "${OPERATOR_VERSION}" == "1.0" ]] && unset EMULATE_TPM
+
+          cd tests && make e2e-bootstrap-node
       - name: Upgrade node 2 (with manual method) to latest build
-        if: inputs.test_type == 'cli'
+        if: inputs.test_type == 'cli' && !contains(inputs.iso_to_test, '/Stable:/')
         env:
           CONTAINER_IMAGE: quay.io/costoolkit/elemental-ci:latest
           UPGRADE_TYPE: manual
           VM_INDEX: 2
         run: cd tests && make e2e-upgrade-node
-      - name: Upgrade node 3 (with managedOSVersionName method) to specified Teal version
-        if: inputs.test_type == 'cli'
-        env:
-          IMAGE_VERSION: teal-5.3
-          UPGRADE_TYPE: managedOSVersionName
-          VM_INDEX: 3
-        run: cd tests && make e2e-upgrade-node
       - name: Bootstrap additional nodes (total of ${{ inputs.node_number }}) with current build (use iPXE)
         if: inputs.test_type == 'cli'
         env:
-          NODE_NUMBER: ${{ inputs.node_number }}
-        run: |
-          cd tests
-          for ((I=4; I<=NODE_NUMBER; ++I)); do
-            echo "=> Bootstrap node ${I}..."
-            VM_INDEX=${I} make e2e-bootstrap-node
-          done
+          VM_INDEX: 4
+          VM_NUMBERS: ${{ inputs.node_number }}
+        run: cd tests && make e2e-bootstrap-node
       - name: List installed nodes
         if: inputs.test_type == 'cli'
         run: sudo virsh list
@@ -312,9 +336,16 @@ jobs:
         if: always()
         env:
           ELEMENTAL_SUPPORT: ${{ inputs.elemental_support }}
+          PROXY: ${{ inputs.proxy }}
           RANCHER_LOG_COLLECTOR: ${{ inputs.rancher_log_collector }}
         run: |
-          cd tests && make e2e-get-logs
+          cd tests && (
+            # Removing 'downloads' is needed to avoid this error during 'make':
+            # 'pattern all: open .../elemental/tests/cypress/downloads: permission denied'
+            sudo rm -rf cypress/downloads
+
+            make e2e-get-logs
+          )
       - name: Upload cluster logs
         if: always()
         uses: actions/upload-artifact@v3
@@ -382,7 +413,7 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
           SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
   delete-runner:
-    if: always() && needs.create-runner.result == 'success'
+    if: always() && needs.create-runner.result == 'success' && inputs.destroy_runner == true
     needs: [create-runner, e2e]
     runs-on: ubuntu-latest
     steps:

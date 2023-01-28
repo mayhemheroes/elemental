@@ -40,18 +40,7 @@ var _ = Describe("E2E - Bootstrap node for UI", Label("ui"), func() {
 			Expect(err).To(Not(HaveOccurred()))
 
 			// Get the YAML config file
-			fileName := "../../install-config.yaml"
-			err = tools.GetFileFromURL(tokenURL, fileName, false)
-			Expect(err).To(Not(HaveOccurred()))
-		})
-
-		By("Starting HTTP server for network installation", func() {
-			// TODO: improve it to run in background!
-			// err := tools.HTTPShare("../..", 8000)
-			// Expect(err).To(Not(HaveOccurred()))
-
-			// Use Python for now...
-			err := exec.Command("../scripts/start-httpd").Run()
+			err = tools.GetFileFromURL(tokenURL, installConfigYaml, false)
 			Expect(err).To(Not(HaveOccurred()))
 		})
 
@@ -75,7 +64,7 @@ var _ = Describe("E2E - Bootstrap node for UI", Label("ui"), func() {
 		By("Adding VM in default network", func() {
 			// Add node in network configuration if needed
 			if macAdrs == "" {
-				err := misc.AddNode(vmName, vmIndex, netDefaultFileName)
+				err := misc.AddNode(netDefaultFileName, vmName, vmIndex)
 				Expect(err).To(Not(HaveOccurred()))
 			}
 
@@ -93,7 +82,7 @@ var _ = Describe("E2E - Bootstrap node for UI", Label("ui"), func() {
 
 		By("Creating and installing VM", func() {
 			// Install VM
-			cmd := exec.Command("../scripts/install-vm", vmName, macAdrs)
+			cmd := exec.Command(installVMScript, vmName, macAdrs)
 			out, err := cmd.CombinedOutput()
 			GinkgoWriter.Printf("%s\n", out)
 			Expect(err).To(Not(HaveOccurred()))

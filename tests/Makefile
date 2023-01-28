@@ -52,6 +52,10 @@ container-tests: build-box/sda.vdi deps
 	ginkgo --label-filter container -r -v ./install
 	ginkgo -r -v ./smoke
 
+# Generate tests description file
+generate-readme:
+	@./scripts/generate-readme > README.md
+
 # E2E tests
 e2e-install-rancher: deps
 	ginkgo --label-filter install -r -v ./e2e
@@ -64,6 +68,6 @@ e2e-bootstrap-node: deps
 e2e-upgrade-node: deps
 	ginkgo --label-filter upgrade -r -v ./e2e
 start-cypress-tests:
-	@./tests/scripts/start_cypress_tests.sh
+	@./scripts/start-cypress-tests
 e2e-get-logs: deps
 	ginkgo --label-filter logs -r -v ./e2e

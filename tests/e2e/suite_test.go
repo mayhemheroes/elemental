@@ -15,37 +15,47 @@ limitations under the License.
 package e2e_test
 
 import (
-	"fmt"
 	"os"
 	"strconv"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/rancher/elemental/tests/e2e/helpers/misc"
 )
 
 const (
-	vmNameRoot         = "node"
-	userName           = "root"
-	userPassword       = "r0s@pwd1"
-	netDefaultFileName = "../assets/net-default.xml"
-	clusterYaml        = "../assets/cluster.yaml"
-	selectorYaml       = "../assets/selector.yaml"
-	registrationYaml   = "../assets/machineregistration.yaml"
-	emulatedTPMYaml    = "../assets/emulated_tpm.yaml"
+	clusterYaml               = "../assets/cluster.yaml"
+	emulateTPMYaml            = "../assets/emulateTPM.yaml"
+	configPrivateCAScript     = "../scripts/config-private-ca"
+	installConfigYaml         = "../../install-config.yaml"
+	installVMScript           = "../scripts/install-vm"
+	netDefaultFileName        = "../assets/net-default.xml"
+	osListYaml                = "../assets/managedOSVersionChannel.yaml"
+	registrationYaml          = "../assets/machineRegistration.yaml"
+	selectorYaml              = "../assets/selector.yaml"
+	upgradeClusterTargetsYaml = "../assets/upgrade_clusterTargets.yaml"
+	upgradeOSVersionNameYaml  = "../assets/upgrade_managedOSVersionName.yaml"
+	userName                  = "root"
+	userPassword              = "r0s@pwd1"
+	vmNameRoot                = "node"
 )
 
 var (
+	addedNode           int
 	arch                string
 	caType              string
 	clusterName         string
 	clusterNS           string
 	elementalSupport    string
-	emulateTPM          string
+	emulateTPM          bool
+	eTPM                string
 	imageVersion        string
 	isoBoot             string
 	k8sVersion          string
+	numberOfVMs         int
 	osImage             string
+	proxy               string
 	rancherChannel      string
 	rancherLogCollector string
 	rancherVersion      string
@@ -63,7 +73,7 @@ func FailWithReport(message string, callerSkip ...int) {
 
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(FailWithReport)
-	RunSpecs(t, "End-To-End Test Suite")
+	RunSpecs(t, "Elemental End-To-End Test Suite")
 }
 
 var _ = BeforeSuite(func() {
@@ -72,12 +82,14 @@ var _ = BeforeSuite(func() {
 	clusterName = os.Getenv("CLUSTER_NAME")
 	clusterNS = os.Getenv("CLUSTER_NS")
 	elementalSupport = os.Getenv("ELEMENTAL_SUPPORT")
-	emulateTPM = os.Getenv("EMULATE_TPM")
+	eTPM = os.Getenv("EMULATE_TPM")
 	imageVersion = os.Getenv("IMAGE_VERSION")
 	index := os.Getenv("VM_INDEX")
 	isoBoot = os.Getenv("ISO_BOOT")
 	k8sVersion = os.Getenv("K8S_VERSION_TO_PROVISION")
+	number := os.Getenv("VM_NUMBERS")
 	osImage = os.Getenv("CONTAINER_IMAGE")
+	proxy = os.Getenv("PROXY")
 	rancherChannel = os.Getenv("RANCHER_CHANNEL")
 	rancherLogCollector = os.Getenv("RANCHER_LOG_COLLECTOR")
 	rancherVersion = os.Getenv("RANCHER_VERSION")
@@ -91,12 +103,31 @@ var _ = BeforeSuite(func() {
 		vmIndex, err = strconv.Atoi(index)
 		Expect(err).To(Not(HaveOccurred()))
 
-		// Now we can set the VM name
-		vmName = vmNameRoot + "-" + fmt.Sprintf("%03d", vmIndex)
+		// Set default hostname
+		vmName = misc.SetHostname(vmNameRoot, vmIndex)
 	}
 
-	// Force a correct value
-	if emulateTPM != "true" {
-		emulateTPM = "false"
+	// Only if VM_NUMBER is set
+	if number != "" {
+		var err error
+		numberOfVMs, err = strconv.Atoi(number)
+		Expect(err).To(Not(HaveOccurred()))
+	} else {
+		// By default set to vmIndex
+		numberOfVMs = vmIndex
 	}
+
+	// Set number of added node
+	addedNode = (numberOfVMs - vmIndex) + 1
+
+	// Force a correct value for emulateTPM
+	switch eTPM {
+	case "true":
+		emulateTPM = true
+	default:
+		emulateTPM = false
+	}
+
+	// Start HTTP server
+	misc.FileShare("../..", ":8000")
 })

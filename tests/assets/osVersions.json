@@ -13,13 +13,13 @@
   },
   {
     "metadata": {
-      "name": "teal-5.2"
+      "name": "fake-image"
     },
     "spec": {
-      "version": "teal-5.2",
+      "version": "fake-image",
       "type": "container",
       "metadata": {
-        "upgradeImage": "registry.opensuse.org/isv/rancher/elemental/teal52/15.3/rancher/elemental-node-image/5.2:latest"
+        "upgradeImage": "fake-image"
       }
     }
   }

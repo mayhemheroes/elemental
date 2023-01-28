@@ -81,7 +81,7 @@ var _ = Describe("E2E - Install Rancher Manager", Label("install"), func() {
 
 		if caType == "private" {
 			By("Configuring Private CA", func() {
-				cmd := exec.Command("../scripts/config-private-ca")
+				cmd := exec.Command(configPrivateCAScript)
 				out, err := cmd.CombinedOutput()
 				GinkgoWriter.Printf("%s\n", out)
 				Expect(err).To(Not(HaveOccurred()))
@@ -149,6 +149,14 @@ var _ = Describe("E2E - Install Rancher Manager", Label("install"), func() {
 				flags = append(flags,
 					"--set", "ingress.tls.source=secret",
 					"--set", "privateCA=true",
+				)
+			}
+
+			// Use Rancher Manager behind proxy
+			if proxy == "rancher" {
+				flags = append(flags,
+					"--set", "proxy=http://172.17.0.1:3128",
+					"--set", "noProxy=127.0.0.0/8\\,10.0.0.0/8\\,cattle-system.svc\\,172.16.0.0/12\\,192.168.0.0/16\\,.svc\\,.cluster.local",
 				)
 			}
 

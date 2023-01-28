@@ -2,16 +2,33 @@
 
 set -e -x
 
-# Variable(s)
+# Variable(s) and default values
 VM_NAME=$1
 MAC=$2
 ARCH=$(uname -m)
 FW_CODE=/usr/share/qemu/ovmf-${ARCH}-smm-suse-code.bin
 FW_VARS=$(realpath ../assets/ovmf-template-vars.fd)
+EMULATED_TPM="none"
+
+# Configure hugepages if needed
+NR_HUGEPAGES=$(</proc/sys/vm/nr_hugepages)
+if (( NR_HUGEPAGES == 0 )); then
+  # Not configured, do it now!
+  MEMTOTAL_KB=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+
+  # Number of hugepages (with hugepagesize set to 2MB)
+  # NOTE: keep 12GB by default for the hypervisor/Rancher Manager Server
+  # And this value can be modified with HOST_MEMORY_RESERVED variable
+  (( VALUE = ((MEMTOTAL_KB - ${HOST_MEMORY_RESERVED:-12582912}) / 2048) ))
+
+  # Set nr_hugepage
+  (( VALUE > 0 )) \
+    && sudo bash -c "echo ${VALUE} > /proc/sys/vm/nr_hugepages"
+fi
 
 # Don't configure TPM if software emulation (EMULATE_TPM=true) is used
 if [[ ${EMULATE_TPM} != "true" ]]; then
-  EMULATED_TPM="--tpm emulator,model=tpm-crb,version=2.0"
+  EMULATED_TPM="emulator,model=tpm-crb,version=2.0"
 fi
 
 # iPXE stuff will not be used if ISO is set
@@ -26,39 +43,55 @@ if [[ ${ISO_BOOT} == "true" ]]; then
   # Force ISO boot
   INSTALL_FLAG="--cdrom ${ISO}"
 else
-  # Exit if binary is not available
-  IPXE_BIN=$(realpath ../assets/ipxe-${ARCH}.efi)
-  [[ ! -f ${IPXE_BIN} ]] \
-    && echo "File ${IPXE_BIN} not found! Exiting!" >&2 \
-    && exit 1
-
-  # Create symlink for binary
+  # Create symlink for binary but only if it doesn't exist
   SYM_LINK=../../ipxe.efi
-  rm -f ${SYM_LINK}  # Force remove, to avoid issue with 'ln'
-  ln -s ${IPXE_BIN} ${SYM_LINK}
+  if [[ ! -h ${SYM_LINK} ]]; then
+    # Exit if binary is not available
+    IPXE_BIN=$(realpath ../assets/ipxe-${ARCH}.efi)
+    [[ ! -f ${IPXE_BIN} ]] \
+      && echo "File ${IPXE_BIN} not found! Exiting!" >&2 \
+      && exit 1
+
+    # Force remove, to avoid issue with 'ln'
+    # Only useful if an EFI file exists and it's not a symlink
+    rm -f ${SYM_LINK}
+    ln -s ${IPXE_BIN} ${SYM_LINK}
+  fi
 
   # Force PXE boot
   INSTALL_FLAG="--pxe"
 fi
 
+# Create logs directory if needed
+mkdir -p logs
+
+# Create a dedicated directory for storage pool
+mkdir -p ${VM_NAME}
+
+# Wait randomly until 20s to avoid running virt-install at the same time
+# Because it can lead to some issues with hugepages
+sleep $((RANDOM % 20))
+
 # Create VM
-script -e -c "sudo virt-install \
+script -e -O logs/bootstrap_${VM_NAME}.log \
+  -c "sudo virt-install \
   --name ${VM_NAME} \
   --os-variant opensuse-unknown \
   --virt-type kvm \
   --machine q35 \
   --boot loader=${FW_CODE},loader.readonly=yes,loader.secure=yes,loader.type=pflash,nvram.template=${FW_VARS} \
   --features smm.state=yes \
-  --ram=3072 \
-  --vcpus=2 \
+  --memorybacking hugepages=yes,size=2,unit=M,locked=yes \
+  --memory 3072,hugepages=yes \
+  --vcpus 2 \
   --cpu host \
-  --disk path=${VM_NAME}.img,bus=scsi,size=35 \
+  --disk path=${VM_NAME}/${VM_NAME}.img,bus=scsi,size=35 \
   --check disk_size=off \
   --graphics none \
   --serial pty \
   --console pty,target_type=virtio \
   --rng random \
-  ${EMULATED_TPM} \
+  --tpm ${EMULATED_TPM} \
   --noreboot \
   ${INSTALL_FLAG} \
   --network network=default,bridge=virbr0,model=virtio,mac=${MAC}"
